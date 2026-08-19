@@ -22,8 +22,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository with LFS
         uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 1
+
+      - name: Verify LFS payloads are materialized
+        run: |
+          git lfs ls-files
+          test ! -f dependency/data/metadata.json || ! grep -q 'git-lfs.github.com/spec/v1' dependency/data/metadata.json
+          test ! -f dependency/data/hs2/01.json || ! grep -q 'git-lfs.github.com/spec/v1' dependency/data/hs2/01.json
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
