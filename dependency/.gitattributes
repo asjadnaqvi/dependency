@@ -1,4 +1,4 @@
-﻿# The GitHub Pages app must serve raw data files as plain text/JSON.
-# Do not apply Git LFS to the deployment bundle; otherwise the browser receives
-# pointer files instead of valid JSON payloads.
-dependency/data/** -filter -diff -merge -text
+# The GitHub Pages app needs Git LFS to materialize the repository's data files
+# during checkout; otherwise the deployment bundle contains pointer files
+# instead of valid JSON payloads.
+data/** filter=lfs diff=lfs merge=lfs -text
