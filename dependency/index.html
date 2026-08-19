@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Country-Product Dependencies</title>
+    <meta name="description" content="Precomputed static dashboard for country-product trade dependencies." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+
+    <header class="hero">
+      <p class="eyebrow">Analytics</p>
+      <h1>Country-Product Dependencies in Trade Networks</h1>
+      <p class="subtitle">
+        Data source: BACI HS22 2024.
+      </p>
+      <div id="metaInfo" class="meta">Loading metadata...</div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel controls-panel">
+        <h2>Controls</h2>
+
+        <div class="control">
+          <fieldset class="hs-digit-level-group" title="Choose the product classification detail used by the dashboard.">
+            <legend>HS digit level</legend>
+            <label class="radio-option">
+              <input type="radio" name="hsDigitLevel" value="2-digit" checked title="Use HS2 chapter-level products." />
+              <span>HS2</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="hsDigitLevel" value="4-digit" title="Use HS4 heading-level products." />
+              <span>HS4</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="hsDigitLevel" value="6-digit" title="Use HS6 item-level products." />
+              <span>HS6</span>
+            </label>
+          </fieldset>
+        </div>
+
+        <div class="control">
+          <label for="hs2Code">Select HS2 chapter</label>
+          <select id="hs2Code" title="Select the HS2 chapter to analyze."></select>
+        </div>
+
+        <div class="control">
+          <label for="hs4Code">Select HS4 heading</label>
+          <select id="hs4Code" title="Select an HS4 heading within the selected chapter."></select>
+        </div>
+
+        <div class="control">
+          <label for="hs6Code">Select HS6 item</label>
+          <select id="hs6Code" title="Select an HS6 item within the selected heading."></select>
+        </div>
+
+        <div class="control checkbox-control">
+          <input id="aggregateEu" type="checkbox" title="Combine EU member countries into one EU27 node." />
+          <label for="aggregateEu">Aggregate EU</label>
+        </div>
+
+        <div class="control">
+          <label for="focusCountry">Select focus country</label>
+          <select id="focusCountry" title="Choose the country at the center of the network analysis."></select>
+        </div>
+
+        <div class="control">
+          <fieldset class="radio-fieldset" title="Choose whether links show trade direction or exporter risk categories.">
+            <legend>Trade linkages</legend>
+            <label class="radio-option">
+              <input type="radio" name="metricType" value="Flows" checked title="Color links by trade direction." />
+              <span>Flows</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="metricType" value="Country risk traffic light" title="Color links by exporter risk thresholds." />
+              <span>Country risk traffic light</span>
+            </label>
+          </fieldset>
+        </div>
+
+        <div class="control">
+          <label for="renderTopX">Top X countries (rendering)</label>
+          <input id="renderTopX" type="range" min="5" max="50" value="25" title="Set the maximum number of countries shown in the network." />
+          <div id="renderTopXValue" class="control-value">25</div>
+        </div>
+
+        <div class="control">
+          <label for="topNPartners">Top import partners in inner ring</label>
+          <input id="topNPartners" type="range" min="1" max="10" value="5" title="Set the number of largest import partners placed in the inner ring." />
+          <div id="topNPartnersValue" class="control-value">5</div>
+        </div>
+
+        <div class="control checkbox-control">
+          <input id="focusEdgesOnly" type="checkbox" title="Hide links that do not touch the selected focus country." />
+          <label for="focusEdgesOnly">Only edges touching focus country</label>
+        </div>
+
+        <div class="control">
+          <label for="edgePercentile">Min edge weight percentile</label>
+          <input id="edgePercentile" type="range" min="0" max="95" step="5" value="35" title="Hide links below this percentile of displayed link weight." />
+          <div id="edgePercentileValue" class="control-value">35</div>
+        </div>
+
+        <div class="control">
+          <label>Risk thresholds</label>
+          <div class="threshold-range" aria-label="Risk thresholds from low to high" title="Set the boundaries between low, moderate, and high exporter risk.">
+            <input id="riskThresholdLow" type="range" min="0" max="1" step="0.05" value="0.35" aria-label="Low to moderate risk threshold" title="Set the low-to-moderate risk boundary." />
+            <input id="riskThresholdHigh" type="range" min="0" max="1" step="0.05" value="0.55" aria-label="Moderate to high risk threshold" title="Set the moderate-to-high risk boundary." />
+          </div>
+          <div class="threshold-values">
+            <span>Low/moderate: <strong id="riskThresholdLowValue">0.35</strong></span>
+            <span>Moderate/high: <strong id="riskThresholdHighValue">0.55</strong></span>
+          </div>
+        </div>
+
+        <div class="control">
+          <fieldset class="radio-fieldset" title="Choose how the heatmap columns are scaled.">
+            <legend>Pairwise heatmap scaling</legend>
+            <label class="radio-option">
+              <input type="radio" name="pairwiseScale" value="Raw index" title="Display unscaled index values." />
+              <span>Raw index</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="pairwiseScale" value="Column-normalized" checked title="Normalize each heatmap column to a 0-10 scale." />
+              <span>Column-normalized</span>
+            </label>
+          </fieldset>
+        </div>
+      </aside>
+
+      <section class="panel network-panel" title="Network links show trade relationships; node colors show regions and link colors show the selected metric.">
+        <h2 id="networkTitle">Network</h2>
+        <div id="networkProduct" class="network-product"></div>
+        <div id="networkLegend" class="legend-row"></div>
+        <div id="cyRoot"></div>
+      </section>
+
+      <section class="panel heat-panel" title="Network-wide HITS dependency index at direct and indirect iterations.">
+        <h2>Dependency Index Heatmap</h2>
+        <div id="dependencyHeatmap" class="chart"></div>
+      </section>
+
+      <section class="panel heat-panel" title="Focus-country pairwise scores combining flow, hub, and authority values.">
+        <h2>Pairwise Score Heatmap</h2>
+        <div id="pairwiseHeatmap" class="chart"></div>
+      </section>
+
+      <section class="panel kpi-panel" title="Normalized risk amplification index comparing risk-weighted and unweighted scores.">
+        <h2>NRAI</h2>
+        <p class="kpi-description">
+          Normalized risk amplification index across direct and indirect trade links.<br />
+          Direct measures the first-order effect of exporters on the selected focus country; Indirect captures the effect after network propagation.<br />
+          Values above 1 indicate risk amplification, values below 1 indicate risk dampening, and 1 indicates no net change.
+        </p>
+        <fieldset class="radio-fieldset" title="Choose how NRAI values are displayed.">
+          <legend>NRAI scale</legend>
+          <label class="radio-option">
+            <input type="radio" name="nraiScale" value="Raw" checked title="Show the original NRAI ratio." />
+            <span>Raw</span>
+          </label>
+          <label class="radio-option">
+            <input type="radio" name="nraiScale" value="Normalized" title="Show NRAI transformed to a 0 to 1 range." />
+            <span>Normalized (0-1)</span>
+          </label>
+        </fieldset>
+        <div class="kpi-grid">
+          <div class="kpi" title="Direct risk amplification after the first HITS iteration.">
+            <div class="kpi-label">Direct</div>
+            <div id="nraiDirect" class="kpi-value">-</div>
+          </div>
+          <div class="kpi" title="Indirect risk amplification after the final HITS iteration.">
+            <div class="kpi-label">Indirect</div>
+            <div id="nraiIndirect" class="kpi-value">-</div>
+          </div>
+        </div>
+        <p id="nraiRegime" class="kpi-regime"></p>
+        <div id="nraiDrivers" class="chart"></div>
+      </section>
+
+      <section class="panel table-panel" title="Country-level trade, risk-weighted values, and hub or authority scores.">
+        <div class="section-heading">
+          <h2>Table</h2>
+          <button id="downloadRawData" type="button" title="Download the raw records for the selected product as a CSV file.">Download raw data</button>
+        </div>
+        <div class="table-wrap">
+          <table id="overviewTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

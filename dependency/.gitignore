@@ -1,0 +1,9 @@
+﻿# Local-only or generated deployment files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+
+# Keep the deployment payloads in the app folder only
+dependency/.git/
