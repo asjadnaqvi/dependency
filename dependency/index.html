@@ -89,13 +89,13 @@
 
         <div class="control">
           <label for="renderTopX">Top X countries (rendering)</label>
-          <input id="renderTopX" type="range" min="5" max="50" value="25" title="Set the maximum number of countries shown in the network." />
+          <input id="renderTopX" type="range" min="5" max="50" value="25" title="Maximum countries including the focus country. Add its suppliers first, then suppliers to its inner-ring partners, ranked by raw trade value." />
           <div id="renderTopXValue" class="control-value">25</div>
         </div>
 
         <div class="control">
           <label for="topNPartners">Top import partners in inner ring</label>
-          <input id="topNPartners" type="range" min="1" max="10" value="5" title="Set the number of largest import partners placed in the inner ring." />
+          <input id="topNPartners" type="range" min="1" max="10" value="5" title="Largest suppliers by raw exports to the focus country, ranked on full product data. Limited by available partners and Top X minus one. Their focus-country links remain visible." />
           <div id="topNPartnersValue" class="control-value">5</div>
         </div>
 
@@ -106,7 +106,7 @@
 
         <div class="control">
           <label for="edgePercentile">Min edge weight percentile</label>
-          <input id="edgePercentile" type="range" min="0" max="95" step="5" value="35" title="Hide links below this percentile of displayed link weight." />
+          <input id="edgePercentile" type="range" min="0" max="95" step="5" value="35" title="Hide links below this percentile of displayed link weight only between non-focus countries. All imports into and exports from the focus country among selected countries remain visible. Selected countries and partner rankings do not change." />
           <div id="edgePercentileValue" class="control-value">35</div>
         </div>
 
@@ -123,15 +123,29 @@
         </div>
 
         <div class="control">
-          <fieldset class="radio-fieldset" title="Choose how the heatmap columns are scaled.">
-            <legend>Pairwise heatmap scaling</legend>
+          <fieldset class="radio-fieldset" title="Choose analytical weighting independently of network link colors.">
+            <legend>Supplier analysis</legend>
             <label class="radio-option">
-              <input type="radio" name="pairwiseScale" value="Raw index" title="Display unscaled index values." />
-              <span>Raw index</span>
+              <input type="radio" name="analysisMode" value="Trade only" checked />
+              <span>Trade only</span>
             </label>
             <label class="radio-option">
-              <input type="radio" name="pairwiseScale" value="Column-normalized" checked title="Normalize each heatmap column to a 0-10 scale." />
-              <span>Column-normalized</span>
+              <input type="radio" name="analysisMode" value="Risk-adjusted" />
+              <span>Risk-adjusted</span>
+            </label>
+          </fieldset>
+        </div>
+
+        <div class="control">
+          <fieldset class="radio-fieldset" title="Choose how the heatmap columns are scaled.">
+            <legend>Heatmap scaling (both charts)</legend>
+            <label class="radio-option">
+              <input type="radio" name="pairwiseScale" value="Raw index" title="Show raw hub and composite exposure scores. Direct import share is a fraction (0-1), not multiplied by 100." />
+              <span>Raw scores</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="pairwiseScale" value="Column-normalized" checked title="Normalize over all suppliers to the focus country before displaying the top 10. Exposure percentages are not actual import shares." />
+              <span>Normalized (%)</span>
             </label>
           </fieldset>
         </div>
@@ -144,21 +158,33 @@
         <div id="cyRoot"></div>
       </section>
 
-      <section class="panel heat-panel" title="Network-wide HITS dependency index at direct and indirect iterations.">
-        <h2>Dependency Index Heatmap</h2>
+      <section class="panel heat-panel" title="The focus country's suppliers and their importance in the full product network.">
+        <h2>Global importance of suppliers</h2>
         <div id="dependencyHeatmap" class="chart"></div>
+        <div class="heatmap-description">
+          <p><strong>How to read:</strong> Higher scores mean a supplier is more important in the global product network, not necessarily a larger source of our imports. Rows show our top 10 suppliers by import value.</p>
+          <p><strong>Direct / Total:</strong> Initial HITS score (iteration 1) / refined score (iteration 30). Compare suppliers within columns; these scores do not measure indirect shipments or substitutability.</p>
+          <p><strong>Scale and risk:</strong> Raw shows hub scores; Normalized (%) shows their shares across all our suppliers, not import shares. Risk-adjusted incorporates country risk. Network display filters and link colors do not affect either heatplot.</p>
+        </div>
       </section>
 
-      <section class="panel heat-panel" title="Focus-country pairwise scores combining flow, hub, and authority values.">
-        <h2>Pairwise Score Heatmap</h2>
+      <section class="panel heat-panel" title="Supplier contributions to the selected focus country's network-based import exposure.">
+        <h2>Import Dependency</h2>
         <div id="pairwiseHeatmap" class="chart"></div>
+        <div class="heatmap-description">
+          <p id="exposureSummary"></p>
+          <p id="exposureWarning" role="status" hidden></p>
+          <p><strong>How to read:</strong> Higher Direct values mean more concentrated sourcing. Rows are ranked by Direct, highest first. In normalized mode, Total above Direct indicates greater relative exposure after accounting for network importance.</p>
+          <p><strong>Direct / Total:</strong> Actual import share / import-share fraction times the supplier's network score at iteration 30. Direct is unchanged by risk weighting; Risk-adjusted uses the risk-weighted network score for Total.</p>
+          <p><strong>Scale and risk:</strong> Raw Direct is a fraction (0.40 = 40%); Total is raw exposure. Normalized Total is exposure share across all suppliers, not actual import share or absolute risk. Total does not measure indirect imports or disruption probability. Missing risk uses multiplier 1 and triggers a warning.</p>
+        </div>
       </section>
 
-      <section class="panel kpi-panel" title="Normalized risk amplification index comparing risk-weighted and unweighted scores.">
+      <section class="panel kpi-panel" hidden title="Normalized risk amplification index comparing risk-weighted and unweighted scores.">
         <h2>NRAI</h2>
         <p class="kpi-description">
           Normalized risk amplification index across direct and indirect trade links.<br />
-          Direct measures the first-order effect of exporters on the selected focus country; Indirect captures the effect after network propagation.<br />
+          Initial compares risk-weighted and trade-only pairwise scores at iteration 1; Refined compares them at iteration 30. These are network-score ratios, not measured indirect trade flows.<br />
           Values above 1 indicate risk amplification, values below 1 indicate risk dampening, and 1 indicates no net change.
         </p>
         <fieldset class="radio-fieldset" title="Choose how NRAI values are displayed.">
@@ -173,12 +199,12 @@
           </label>
         </fieldset>
         <div class="kpi-grid">
-          <div class="kpi" title="Direct risk amplification after the first HITS iteration.">
-            <div class="kpi-label">Direct</div>
+          <div class="kpi" title="Risk amplification at HITS iteration 1.">
+            <div class="kpi-label">Initial (1)</div>
             <div id="nraiDirect" class="kpi-value">-</div>
           </div>
-          <div class="kpi" title="Indirect risk amplification after the final HITS iteration.">
-            <div class="kpi-label">Indirect</div>
+          <div class="kpi" title="Risk amplification at HITS iteration 30.">
+            <div class="kpi-label">Refined (30)</div>
             <div id="nraiIndirect" class="kpi-value">-</div>
           </div>
         </div>
@@ -186,10 +212,16 @@
         <div id="nraiDrivers" class="chart"></div>
       </section>
 
-      <section class="panel table-panel" title="Country-level trade, risk-weighted values, and hub or authority scores.">
+      <section class="panel table-panel" title="All countries in the selected product network, with suppliers ranked first by import share.">
         <div class="section-heading">
-          <h2>Table</h2>
+          <h2>Country and supplier details</h2>
           <button id="downloadRawData" type="button" title="Download the raw records for the selected product as a CSV file.">Download raw data</button>
+        </div>
+        <div class="heatmap-description">
+          <p><strong>Country:</strong> Country code and name. <strong>Product exports to focus:</strong> Bilateral product trade in source units. <strong>Import share:</strong> Share of the focus country's product imports. <strong>Exporter risk:</strong> Country risk score (0-1); missing values use multiplier 1.</p>
+          <p><strong>Trade-only hub (1) / (30):</strong> Initial / refined global network importance. <strong>Risk-adjusted hub (1) / (30):</strong> The same scores with country-risk weighting. <strong>Trade-only / Risk-adjusted exposure:</strong> Import-share fraction times the corresponding iteration-30 hub score.</p>
+          <p><strong>Global importance - Direct / Total:</strong> Initial / refined hub scores under the selected weighting. <strong>Import Dependency - Direct / Total:</strong> Import share / network-adjusted exposure under the selected weighting. These four columns match the heatplots.</p>
+          <p>Raw shows scores and import-share fractions; Normalized (%) uses all suppliers as denominators. Full-country hub columns need not sum to 100%. Non-suppliers have zero bilateral exports, import share and exposure.</p>
         </div>
         <div class="table-wrap">
           <table id="overviewTable">

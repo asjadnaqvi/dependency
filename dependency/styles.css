@@ -306,12 +306,17 @@ input[type="checkbox"] {
   min-height: 360px;
 }
 
+.heat-panel .chart {
+  height: 400px;
+}
+
 .kpi-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.8rem;
 }
 
+.heatmap-description,
 .kpi-description {
   margin: 0.2rem 0 0.7rem;
   color: var(--ink-1);
@@ -398,7 +403,6 @@ th {
     grid-template-areas:
       "controls network network"
       "controls depheat pairheat"
-      "kpi kpi pairheat"
       "table table table";
   }
 

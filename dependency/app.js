@@ -1,6 +1,7 @@
 const METADATA_URL = "data/metadata.json";
 const HS2_BASE = "data/hs2";
 const RISK_FILE_URL = "data/gew_riskindi.xlsx";
+const HITS_ITERATIONS = 30;
 
 let cy = null; // Global cytoscape instance
 
@@ -11,13 +12,23 @@ const EU27_CODES = new Set([
 ]);
 
 const REGION_COLORS = {
-  Asien: "#F4B942",
-  Afrika: "#67B7AE",
-  Ozeanien: "#E58AAA",
-  Amerika: "#A78BFA",
-  "Europa-EU": "#6EA8FE",
-  "Europa-Rest": "#9CC7FF",
+  Asia: "#F4B942",
+  Africa: "#67B7AE",
+  Oceania: "#E58AAA",
+  Americas: "#A78BFA",
+  "Europe (EU)": "#6EA8FE",
+  "Europe (non-EU)": "#9CC7FF",
   Other: "#CBD5E1",
+};
+
+const EDGE_COLORS = {
+  incoming: "rgba(37, 99, 235, 0.92)",
+  outgoing: "rgba(225, 29, 72, 0.90)",
+  other: "rgba(148, 163, 184, 0.55)",
+  lowRisk: "rgba(0, 200, 0, 0.7)",
+  moderateRisk: "rgba(255, 215, 0, 0.7)",
+  highRisk: "rgba(255, 0, 0, 0.7)",
+  unknownRisk: "rgba(59, 130, 246, 0.75)",
 };
 
 const state = {
@@ -33,6 +44,7 @@ const state = {
     aggregateEu: false,
     focusCountry: "AUT",
     metricType: "Flows",
+    analysisMode: "Trade only",
     renderTopX: 25,
     topNPartners: 5,
     focusEdgesOnly: false,
@@ -57,6 +69,7 @@ const els = {
   aggregateEu: document.getElementById("aggregateEu"),
   focusCountry: document.getElementById("focusCountry"),
   metricType: document.querySelectorAll('input[name="metricType"]'),
+  analysisMode: document.querySelectorAll('input[name="analysisMode"]'),
   renderTopX: document.getElementById("renderTopX"),
   renderTopXValue: document.getElementById("renderTopXValue"),
   topNPartners: document.getElementById("topNPartners"),
@@ -73,6 +86,8 @@ const els = {
 
   dependencyHeatmap: document.getElementById("dependencyHeatmap"),
   pairwiseHeatmap: document.getElementById("pairwiseHeatmap"),
+  exposureSummary: document.getElementById("exposureSummary"),
+  exposureWarning: document.getElementById("exposureWarning"),
   nraiDirect: document.getElementById("nraiDirect"),
   nraiIndirect: document.getElementById("nraiIndirect"),
   nraiRegime: document.getElementById("nraiRegime"),
@@ -93,12 +108,12 @@ function formatNumber(value, maxFractionDigits = 2) {
 function regionBucket(value) {
   if (!value) return "Other";
   const key = String(value).trim().toLowerCase().replaceAll("_", "-");
-  if (key === "asien" || key === "asia") return "Asien";
-  if (key === "afrika" || key === "africa") return "Afrika";
-  if (key === "ozeanien" || key === "oceania") return "Ozeanien";
-  if (key === "amerika" || key === "americas" || key === "america") return "Amerika";
-  if (["europa-eu", "europe-eu", "eu", "eu27", "europa eu", "europe eu"].includes(key)) return "Europa-EU";
-  if (["europa-rest", "europe-rest", "europa", "europe", "europe-other"].includes(key)) return "Europa-Rest";
+  if (key === "asien" || key === "asia") return "Asia";
+  if (key === "afrika" || key === "africa") return "Africa";
+  if (key === "ozeanien" || key === "oceania") return "Oceania";
+  if (key === "amerika" || key === "americas" || key === "america") return "Americas";
+  if (["europa-eu", "europe-eu", "eu", "eu27", "europa eu", "europe eu", "europe (eu)"].includes(key)) return "Europe (EU)";
+  if (["europa-rest", "europe-rest", "europa", "europe", "europe-other", "europe (non-eu)"].includes(key)) return "Europe (non-EU)";
   return "Other";
 }
 
@@ -361,7 +376,7 @@ function aggregateEuRows(rows, focusCountry) {
     }
     const agg = map.get(key);
     const v = Number(row.value || 0);
-    const risk = Number(row.ps_norm);
+    const risk = row.ps_norm == null ? NaN : Number(row.ps_norm);
     agg.value += v;
     if (Number.isFinite(risk) && v > 0) {
       agg.weightedSum += risk * v;
@@ -390,10 +405,23 @@ function aggregateEuRows(rows, focusCountry) {
   return { rows: out, centerCountry: center };
 }
 
+function rankImportPartners(rows, destinations) {
+  const incoming = new Map();
+  for (const row of rows) {
+    const value = Number(row.value || 0);
+    if (destinations.has(row.to) && row.from !== row.to && value > 0) {
+      incoming.set(row.from, (incoming.get(row.from) || 0) + value);
+    }
+  }
+  return [...incoming.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([country]) => country);
+}
+
 function computeRenderRows(rows, centerCountry) {
   const flowRows = rows.map((row) => {
     const base = Number(row.value || 0);
-    const risk = Number(row.ps_norm);
+    const risk = row.ps_norm == null ? NaN : Number(row.ps_norm);
     // Fallback to 1.0 if ps_norm is NaN (unweighted), matching Python fillna(1.0)
     const normalizedRisk = Number.isFinite(risk) ? risk : 1.0;
     // Apply risk weighting when metricType is NOT 'Flows' (line 752 in phoenigs18_v6.py)
@@ -404,34 +432,34 @@ function computeRenderRows(rows, centerCountry) {
     return { ...row, flow_weight };
   });
 
-  const strengthMap = new Map();
-  for (const row of flowRows) {
-    strengthMap.set(row.from, (strengthMap.get(row.from) || 0) + Number(row.value || 0));
-    strengthMap.set(row.to, (strengthMap.get(row.to) || 0) + Number(row.value || 0));
-  }
-
-  const rankedNodes = [...strengthMap.entries()].sort((a, b) => b[1] - a[1]).map((x) => x[0]);
-  const selectedNodes = rankedNodes.filter((n) => n !== centerCountry).slice(0, Math.max(0, state.controls.renderTopX - 1));
-  const renderNodeSet = new Set([centerCountry, ...selectedNodes]);
+  const partnerLimit = Math.max(0, state.controls.renderTopX - 1);
+  const focusPartners = rankImportPartners(flowRows, new Set([centerCountry]));
+  const innerCircle = focusPartners.slice(0, Math.min(state.controls.topNPartners, partnerLimit));
+  const secondaryPartners = rankImportPartners(flowRows, new Set(innerCircle));
+  const selectedNodes = [...new Set([...focusPartners, ...secondaryPartners])]
+    .filter((node) => node !== centerCountry)
+    .slice(0, partnerLimit);
+  const renderNodes = [centerCountry, ...selectedNodes];
+  const renderNodeSet = new Set(renderNodes);
 
   let filtered = flowRows.filter((row) => renderNodeSet.has(row.from) && renderNodeSet.has(row.to));
-
-  if (state.controls.focusEdgesOnly) {
-    filtered = filtered.filter((row) => row.from === centerCountry || row.to === centerCountry);
-  }
 
   if (state.controls.edgePercentile > 0 && filtered.length) {
     const values = filtered.map((row) => Number(row.flow_weight || 0)).sort((a, b) => a - b);
     const idx = Math.floor((state.controls.edgePercentile / 100) * (values.length - 1));
     const cutoff = values[Math.max(0, Math.min(values.length - 1, idx))];
-    filtered = filtered.filter((row) => Number(row.flow_weight || 0) >= cutoff);
+    // Preserve all direct focus-country trade among the selected countries.
+    filtered = filtered.filter((row) =>
+      row.from === centerCountry || row.to === centerCountry ||
+      Number(row.flow_weight || 0) >= cutoff
+    );
   }
 
-  if (!filtered.length) {
-    filtered = flowRows.filter((row) => renderNodeSet.has(row.from) && renderNodeSet.has(row.to));
+  if (state.controls.focusEdgesOnly) {
+    filtered = filtered.filter((row) => row.from === centerCountry || row.to === centerCountry);
   }
 
-  return { flowRows, renderRows: filtered };
+  return { flowRows, renderRows: filtered, renderNodes, innerCircle };
 }
 
 function buildAdjacency(rows) {
@@ -456,7 +484,7 @@ function l2norm(vec) {
   return Math.sqrt(sum);
 }
 
-function hitsIterative(adj, nodeWeights = null, maxIter = 5, tol = 1e-6) {
+function hitsIterative(adj, nodeWeights = null, maxIter = HITS_ITERATIONS) {
   const n = adj.length;
   let h = new Array(n).fill(1);
   let a = new Array(n).fill(1);
@@ -486,11 +514,8 @@ function hitsIterative(adj, nodeWeights = null, maxIter = 5, tol = 1e-6) {
 
     history.push({ hub: hNew.slice(), authority: aNew.slice() });
 
-    let diff = 0;
-    for (let i = 0; i < n; i += 1) diff += Math.abs(hNew[i] - h[i]) + Math.abs(aNew[i] - a[i]);
     h = hNew;
     a = aNew;
-    if (diff < tol) break;
   }
 
   return history;
@@ -513,23 +538,8 @@ function polarToCartesian(radius, angleDeg) {
   return { x: radius * Math.cos(rad), y: radius * Math.sin(rad) };
 }
 
-function buildRingPositions(rows, centerCountry) {
-  const incoming = new Map();
-  for (const row of rows) {
-    if (row.to === centerCountry) {
-      incoming.set(row.from, (incoming.get(row.from) || 0) + Number(row.value || 0));
-    }
-  }
-
-  const topN = Math.max(1, Number(state.controls.topNPartners || 5));
-  const innerCircle = [...incoming.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map((x) => x[0]);
-
-  const allFrom = [...new Set(rows.map((r) => r.from))];
-  const outerCircle = allFrom.filter((n) => n !== centerCountry && !innerCircle.includes(n));
-  const allNodes = [...new Set(rows.flatMap((r) => [r.from, r.to]))].sort();
+function buildRingPositions(renderNodes, innerCircle, centerCountry) {
+  const outerCircle = renderNodes.filter((n) => n !== centerCountry && !innerCircle.includes(n));
 
   const pos = new Map();
   pos.set(centerCountry, { x: 0, y: 0 });
@@ -539,12 +549,6 @@ function buildRingPositions(rows, centerCountry) {
   });
   outerCircle.forEach((node, i) => {
     const p = polarToCartesian(3.0, (360 * i) / Math.max(1, outerCircle.length));
-    pos.set(node, p);
-  });
-
-  const remaining = allNodes.filter((n) => !pos.has(n));
-  remaining.forEach((node, i) => {
-    const p = polarToCartesian(4.2, (360 * i) / Math.max(1, remaining.length));
     pos.set(node, p);
   });
 
@@ -561,31 +565,44 @@ function renderLegend() {
   const low = state.controls.riskThresholdLow.toFixed(2);
   const high = state.controls.riskThresholdHigh.toFixed(2);
   const riskEntries = [
-    ["Low", "rgba(0, 200, 0, 0.7)", `&lt; ${low}`],
-    ["Moderate", "rgba(255, 215, 0, 0.7)", `${low} to &lt; ${high}`],
-    ["High", "rgba(255, 0, 0, 0.7)", `&ge; ${high}`],
-    ["No risk data", "rgba(59, 130, 246, 0.75)", "fallback"],
+    ["Low", EDGE_COLORS.lowRisk, `&lt; ${low}`],
+    ["Moderate", EDGE_COLORS.moderateRisk, `${low} to &lt; ${high}`],
+    ["High", EDGE_COLORS.highRisk, `&ge; ${high}`],
+    ["No risk data", EDGE_COLORS.unknownRisk, "fallback"],
   ]
     .map(
       ([name, color, range]) =>
         `<span class="legend-item"><span class="legend-dot" style="background:${color}"></span>${name} (${range})</span>`
     )
     .join("");
+  const flowEntries = [
+    ["Imports into focus country", EDGE_COLORS.incoming],
+    ["Exports from focus country", EDGE_COLORS.outgoing],
+    ["Other links (dimmed)", EDGE_COLORS.other],
+  ]
+    .map(
+      ([name, color]) =>
+        `<span class="legend-item"><span class="legend-dot" style="background:${color}"></span>${name}</span>`
+    )
+    .join("");
+  const edgeLegend = state.controls.metricType === "Flows"
+    ? `<span class="legend-title">Trade direction</span>${flowEntries}`
+    : `<span class="legend-title">Risk thresholds</span>${riskEntries}<span class="legend-item">Non-focus links are dimmed</span>`;
 
   els.networkLegend.innerHTML = `
     <div class="legend-group"><span class="legend-title">Regions</span>${entries}</div>
-    <div class="legend-group"><span class="legend-title">Risk thresholds</span>${riskEntries}</div>
+    <div class="legend-group">${edgeLegend}</div>
   `;
 }
 
-function renderNetwork(renderRows, centerCountry) {
+function renderNetwork(renderRows, centerCountry, flowRows, renderNodes, innerCircle) {
   renderLegend();
-  const { pos, innerCircle } = buildRingPositions(renderRows, centerCountry);
-  const nodes = [...new Set(renderRows.flatMap((r) => [r.from, r.to]))];
+  const { pos } = buildRingPositions(renderNodes, innerCircle, centerCountry);
+  const nodes = renderNodes;
 
   const exporterTotals = new Map();
   const exporterToCenter = new Map();
-  for (const row of renderRows) {
+  for (const row of flowRows) {
     exporterTotals.set(row.from, (exporterTotals.get(row.from) || 0) + Number(row.value || 0));
     if (row.to === centerCountry) {
       exporterToCenter.set(row.from, (exporterToCenter.get(row.from) || 0) + Number(row.value || 0));
@@ -599,10 +616,10 @@ function renderNetwork(renderRows, centerCountry) {
     const p = pos.get(node) || { x: 0, y: 0 };
     const outgoing = exporterTotals.get(node) || 0;
     const toCenter = exporterToCenter.get(node) || 0;
-    const exporterRow = renderRows.find((r) => r.from === node);
-    const importerRow = renderRows.find((r) => r.to === node);
+    const exporterRow = flowRows.find((r) => r.from === node);
+    const importerRow = flowRows.find((r) => r.to === node);
     const sourceRegion = exporterRow?.ex_region || importerRow?.im_region || "Other";
-    const region = EU27_CODES.has(node) ? "Europa-EU" : regionBucket(sourceRegion);
+    const region = EU27_CODES.has(node) ? "Europe (EU)" : regionBucket(sourceRegion);
     const baseColor = node === centerCountry ? "#F87171" : REGION_COLORS[region] || REGION_COLORS.Other;
     const labelColor = node === centerCountry ? "#111827" : "#172033";
     const size = 50 + (Math.log1p(toCenter) / Math.log1p(sizeBaseMax)) * 70;
@@ -614,7 +631,7 @@ function renderNetwork(renderRows, centerCountry) {
         size,
         fill: baseColor,
         labelColor,
-        title: `${nameByIso3(node)} (${node})\nExports total: ${formatNumber(outgoing, 0)}\nExports to ${centerCountry}: ${formatNumber(toCenter, 0)}`,
+        title: `${nameByIso3(node)} (${node})\nExports total (full product data): ${formatNumber(outgoing, 0)}\nExports to ${centerCountry}: ${formatNumber(toCenter, 0)}`,
       },
       position: { x: p.x * 170, y: -p.y * 170 },
       classes: node === centerCountry ? "focus-node" : "",
@@ -627,29 +644,23 @@ function renderNetwork(renderRows, centerCountry) {
   );
   const edgeElements = renderRows.map((row) => {
     const weight = Number(row.flow_weight || 0);
-    const risk = Number(row.ps_norm);
+    const risk = row.ps_norm == null ? NaN : Number(row.ps_norm);
     const width = 0.8 + (Math.log1p(weight) / Math.log1p(maxEdge)) * 8.0;
 
-    let color = "rgba(148, 163, 184, 0.55)";
-    const relevant = row.from === centerCountry || row.to === centerCountry || innerCircle.includes(row.from) || innerCircle.includes(row.to);
+    let color = EDGE_COLORS.other;
+    const touchesFocus = row.from === centerCountry || row.to === centerCountry;
 
-    // Match Python logic: phoenigs18_v6.py lines 1134-1158
     if (state.controls.metricType === "Flows") {
-      // Flows mode: color by flow direction
-      if (relevant && row.to === centerCountry) color = "rgba(37, 99, 235, 0.92)"; // flow incoming
-      else if (relevant && row.from === centerCountry) color = "rgba(225, 29, 72, 0.90)"; // flow outgoing
-      else if (relevant) color = "rgba(59, 130, 246, 0.75)"; // other relevant
-      else color = "rgba(148, 163, 184, 0.55)"; // dimmed
+      if (row.to === centerCountry) color = EDGE_COLORS.incoming;
+      else if (row.from === centerCountry) color = EDGE_COLORS.outgoing;
     } else if (state.controls.metricType === "Country risk traffic light") {
-      // Traffic light mode: color by risk threshold
-      if (Number.isFinite(risk) && relevant) {
-        if (risk < state.controls.riskThresholdLow) color = "rgba(0, 200, 0, 0.7)"; // green: low risk
-        else if (risk < state.controls.riskThresholdHigh) color = "rgba(255, 215, 0, 0.7)"; // yellow: moderate risk
-        else color = "rgba(255, 0, 0, 0.7)"; // red: high risk
-      } else if (relevant) {
-        color = "rgba(59, 130, 246, 0.75)"; // relevant but no risk data
+      if (Number.isFinite(risk)) {
+        if (risk < state.controls.riskThresholdLow) color = EDGE_COLORS.lowRisk;
+        else if (risk < state.controls.riskThresholdHigh) color = EDGE_COLORS.moderateRisk;
+        else color = EDGE_COLORS.highRisk;
+      } else {
+        color = EDGE_COLORS.unknownRisk;
       }
-      // else: keep default gray for non-relevant edges
     }
 
     return {
@@ -661,7 +672,7 @@ function renderNetwork(renderRows, centerCountry) {
         color,
         title: `${row.from} -> ${row.to} | Value: ${formatNumber(Number(row.value || 0), 0)} | Risk: ${Number.isFinite(risk) ? risk.toFixed(2) : "N/A"}`,
       },
-      classes: relevant ? "" : "muted-edge",
+      classes: touchesFocus ? "" : "muted-edge",
     };
   });
 
@@ -753,7 +764,7 @@ function computeRiskWeights(flowRows, nodes) {
   for (const row of flowRows) {
     const key = row.from;
     if (!stats.has(key)) stats.set(key, { sum: 0, count: 0 });
-    const risk = Number(row.ps_norm);
+    const risk = row.ps_norm == null ? NaN : Number(row.ps_norm);
     if (Number.isFinite(risk)) {
       const cur = stats.get(key);
       cur.sum += risk;
@@ -770,13 +781,13 @@ function computeRiskWeights(flowRows, nodes) {
   });
 }
 
-function scaleHeatmapColumns(values) {
-  if (state.controls.pairwiseScale === "Column-normalized") {
+function scaleHeatmapColumns(values, normalized = state.controls.pairwiseScale === "Column-normalized") {
+  if (normalized) {
     const sumDirect = values.reduce((acc, row) => acc + row[0], 0) || 1;
     const sumIndirect = values.reduce((acc, row) => acc + row[1], 0) || 1;
     return {
-      z: values.map((row) => [(row[0] / sumDirect) * 10, (row[1] / sumIndirect) * 10]),
-      zmax: 10,
+      z: values.map((row) => [(row[0] / sumDirect) * 100, (row[1] / sumIndirect) * 100]),
+      zmax: 100,
     };
   }
 
@@ -784,78 +795,125 @@ function scaleHeatmapColumns(values) {
   return { z: values, zmax: max };
 }
 
-function renderDependencyHeatmap(countryNames, hubsDirect, hubsIndirect, centerCountry, metricType) {
-  const topCountries = countryNames
-    .filter((c) => c !== centerCountry)
-    .sort((a, b) => (hubsDirect.get(b) || 0) - (hubsDirect.get(a) || 0))
-    .slice(0, 10);
-
-  const rawZ = topCountries.map((c) => [10 * (hubsDirect.get(c) || 0), 10 * (hubsIndirect.get(c) || 0)]);
-  const { z, zmax } = scaleHeatmapColumns(rawZ);
-
-  Plotly.newPlot(
-    els.dependencyHeatmap,
-    [
-      {
-        type: "heatmap",
-        z,
-        x: ["Direct", "Indirect"],
-        y: topCountries,
-        colorscale: metricType === "Flows" ? "YlOrBr" : "Sunsetdark",
-        zmin: 0,
-        zmax,
-        text: z.map((row) => row.map((v) => v.toFixed(3))),
-        texttemplate: "%{text}",
-        hovertemplate: "%{y} %{x}: %{z:.3f}<extra></extra>",
-      },
-    ],
-    {
-      margin: { l: 80, r: 20, t: 20, b: 20 },
-      yaxis: { autorange: "reversed" },
-      paper_bgcolor: "rgba(0,0,0,0)",
-      plot_bgcolor: "rgba(0,0,0,0)",
-      font: { family: "Space Grotesk, sans-serif", color: "#131313" },
-    },
-    { responsive: true, displaylogo: false }
-  );
+function computeSupplierAnalysis(rows, centerCountry) {
+  // Risk belongs in the HITS node multipliers, not also in adjacency weights.
+  const tradeRows = rows.map((row) => ({ ...row, flow_weight: Number(row.value || 0) }));
+  const adjacency = buildAdjacency(tradeRows);
+  const riskWeights = computeRiskWeights(tradeRows, adjacency.nodes);
+  const hitsRaw = hitsIterative(adjacency.matrix);
+  const hitsRisk = hitsIterative(adjacency.matrix, riskWeights);
+  const imports = new Map();
+  for (const row of tradeRows) {
+    if (row.to === centerCountry && row.from !== centerCountry && row.value > 0) {
+      imports.set(row.from, (imports.get(row.from) || 0) + Number(row.value));
+    }
+  }
+  const totalImports = [...imports.values()].reduce((sum, value) => sum + value, 0);
+  const suppliers = [...imports].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([country, value]) => {
+      const idx = adjacency.idxByNode.get(country);
+      const importShare = value / totalImports;
+      const raw = [hitsRaw[0].hub[idx], hitsRaw[HITS_ITERATIONS - 1].hub[idx]];
+      const risk = [hitsRisk[0].hub[idx], hitsRisk[HITS_ITERATIONS - 1].hub[idx]];
+      return {
+        country, value, importShare, raw, risk,
+        rawExposure: importShare * raw[1],
+        riskExposure: importShare * risk[1],
+        supplierRisk: riskWeights[idx],
+        missingRisk: !tradeRows.some((row) =>
+          row.from === country && row.ps_norm != null && Number.isFinite(Number(row.ps_norm))
+        ),
+      };
+    });
+  const supplierByCountry = new Map(suppliers.map((supplier) => [supplier.country, supplier]));
+  const countries = adjacency.nodes.map((country, idx) => supplierByCountry.get(country) || {
+    country, value: 0, importShare: 0,
+    raw: [hitsRaw[0].hub[idx], hitsRaw[HITS_ITERATIONS - 1].hub[idx]],
+    risk: [hitsRisk[0].hub[idx], hitsRisk[HITS_ITERATIONS - 1].hub[idx]],
+    rawExposure: 0, riskExposure: 0,
+    supplierRisk: riskWeights[idx],
+    missingRisk: !tradeRows.some((row) =>
+      row.from === country && row.ps_norm != null && Number.isFinite(Number(row.ps_norm))
+    ),
+  }).sort((a, b) => b.importShare - a.importShare || a.country.localeCompare(b.country));
+  return { adjacency, hitsRaw, hitsRisk, suppliers, countries, totalImports };
 }
 
-function renderPairwiseHeatmap(countryNames, autDirect, autIndirect, centerCountry, metricType) {
-  const pairs = countryNames
-    .filter((c) => c !== centerCountry)
-    .map((c) => ({ country: c, direct: autDirect.get(c) || 0, indirect: autIndirect.get(c) || 0 }))
-    .sort((a, b) => b.direct - a.direct)
+function supplierHeatmapData(analysis, riskAdjusted, normalized) {
+  const key = riskAdjusted ? "risk" : "raw";
+  const exposureKey = riskAdjusted ? "riskExposure" : "rawExposure";
+  const allNetwork = analysis.suppliers.map((supplier) => supplier[key]);
+  const network = normalized ? scaleHeatmapColumns(allNetwork, true).z : allNetwork;
+  const totalExposure = analysis.suppliers.reduce((sum, supplier) => sum + supplier[exposureKey], 0);
+  const exposureDisplayed = [...analysis.suppliers]
+    .sort((a, b) => b.importShare - a.importShare || a.country.localeCompare(b.country))
     .slice(0, 10);
+  return {
+    displayed: analysis.suppliers.slice(0, 10),
+    exposureDisplayed,
+    network: network.slice(0, 10),
+    exposure: exposureDisplayed.map((supplier) => [
+      supplier.importShare * (normalized ? 100 : 1),
+      normalized
+        ? (totalExposure > 0 ? supplier[exposureKey] / totalExposure * 100 : 0)
+        : supplier[exposureKey],
+    ]),
+    totalExposure,
+  };
+}
 
-  const rawZ = pairs.map((p) => [p.direct, p.indirect]);
-  let { z, zmax } = scaleHeatmapColumns(rawZ);
-  let zmin = 0;
-
-  Plotly.newPlot(
-    els.pairwiseHeatmap,
-    [
-      {
-        type: "heatmap",
-        z,
-        x: ["Direct", "Indirect"],
-        y: pairs.map((p) => p.country),
-        colorscale: metricType === "Flows" ? "YlOrBr" : "Sunsetdark",
-        zmin,
-        zmax,
-        text: z.map((row) => row.map((v) => v.toFixed(3))),
-        texttemplate: "%{text}",
-        hovertemplate: "%{y} %{x}: %{z:.3f}<extra></extra>",
-      },
-    ],
-    {
-      margin: { l: 80, r: 20, t: 20, b: 20 },
-      yaxis: { autorange: "reversed" },
-      paper_bgcolor: "rgba(0,0,0,0)",
-      plot_bgcolor: "rgba(0,0,0,0)",
-      font: { family: "Space Grotesk, sans-serif", color: "#131313" },
-    },
-    { responsive: true, displaylogo: false }
-  );
+function renderSupplierHeatmaps(analysis) {
+  const riskAdjusted = state.controls.analysisMode === "Risk-adjusted";
+  const normalized = state.controls.pairwiseScale === "Column-normalized";
+  const data = supplierHeatmapData(analysis, riskAdjusted, normalized);
+  const coverage = data.exposureDisplayed.reduce((sum, supplier) => sum + supplier.importShare, 0) * 100;
+  const missingRisk = analysis.suppliers.filter((supplier) => supplier.missingRisk);
+  els.exposureSummary.textContent = analysis.suppliers.length
+    ? `Showing ${data.exposureDisplayed.length} of ${analysis.suppliers.length} suppliers, covering ${coverage.toFixed(1)}% of product imports.`
+    : "No positive imports from external suppliers for this country and product.";
+  const warnings = [];
+  if (analysis.suppliers.length && data.totalExposure === 0) {
+    warnings.push("Selected network exposure is zero; normalized exposure shares are undefined and shown as zero.");
+  }
+  if (missingRisk.length) {
+    warnings.push(`Missing supplier risk: ${missingRisk.map((supplier) => supplier.country).join(", ")}; neutral multiplier 1 is used.`);
+  }
+  els.exposureWarning.textContent = warnings.join(" ");
+  els.exposureWarning.hidden = !warnings.length;
+  const layout = {
+    height: 400,
+    margin: { l: 65, r: 20, t: 30, b: 80 },
+    xaxis: { tickangle: 0, automargin: true },
+    yaxis: { autorange: "reversed" },
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(0,0,0,0)",
+    font: { family: "Space Grotesk, sans-serif", color: "#131313" },
+    annotations: analysis.suppliers.length ? [] : [{
+      text: "No suppliers for this country and product", showarrow: false,
+      x: 0.5, y: 0.5, xref: "paper", yref: "paper",
+    }],
+  };
+  const plot = (element, z, x, isExposure) => {
+    const suppliers = isExposure ? data.exposureDisplayed : data.displayed;
+    const customdata = suppliers.map((supplier) => [
+      supplier.value, supplier.importShare * 100,
+      supplier[riskAdjusted ? "risk" : "raw"][1],
+    ]);
+    const trace = {
+      type: "heatmap", z, x,
+      y: suppliers.map((supplier) => supplier.country),
+      colorscale: riskAdjusted ? "Sunsetdark" : "YlOrBr",
+      zmin: 0, zmax: normalized ? 100 : 1,
+      customdata: z.map((row, i) => row.map((value) => [value, ...customdata[i]])),
+      text: z.map((row) => row.map((value) => value.toFixed(normalized ? 2 : 6))),
+      texttemplate: "%{text}",
+      colorbar: { title: normalized ? "%" : isExposure ? "Raw score" : "Hub score" },
+      hovertemplate: "%{y}<br>%{x}: %{customdata[0]:.6f}<br>Product exports to focus: %{customdata[1]:,.2f}<br>Import share: %{customdata[2]:.2f}%<br>Refined hub score: %{customdata[3]:.6f}<extra></extra>",
+    };
+    Plotly.newPlot(element, [trace], layout, { responsive: true, displaylogo: false });
+  };
+  plot(els.dependencyHeatmap, data.network, ["Direct", "Total"], false);
+  plot(els.pairwiseHeatmap, data.exposure, ["Direct", "Total"], true);
 }
 
 function renderNrai(direct, indirect, deltas) {
@@ -874,7 +932,9 @@ function renderNrai(direct, indirect, deltas) {
   els.nraiIndirect.style.color = Number.isFinite(indirectDisplayValue) ? indirectColor : "#64748b";
 
   const regime = Number.isFinite(directValue) && Number.isFinite(indirectValue) ? classifyRegime(directValue, indirectValue) : "-";
-  els.nraiRegime.textContent = `Overall regime: ${regime}`;
+  els.nraiRegime.textContent = regime === "-"
+    ? "NRAI unavailable: no positive trade-only pairwise baseline."
+    : `Overall regime: ${regime}`;
   els.nraiRegime.style.color = "#6b4f2a";
 
   const totalAbsoluteDelta = [...deltas.values()].reduce(
@@ -895,6 +955,8 @@ function renderNrai(direct, indirect, deltas) {
     .slice(0, 10)
     .reverse();
 
+  if (els.nraiDrivers.closest?.("[hidden]")) return;
+
   Plotly.newPlot(
     els.nraiDrivers,
     [
@@ -903,7 +965,7 @@ function renderNrai(direct, indirect, deltas) {
         orientation: "h",
         y: top.map((r) => `${r.country} - ${nameByIso3(r.country).slice(0, 18)}`),
         x: top.map((r) => r.direct),
-        name: "Direct delta",
+        name: "Initial delta (1)",
         marker: { color: "rgba(37, 99, 235, 0.86)" },
       },
       {
@@ -911,7 +973,7 @@ function renderNrai(direct, indirect, deltas) {
         orientation: "h",
         y: top.map((r) => `${r.country} - ${nameByIso3(r.country).slice(0, 18)}`),
         x: top.map((r) => r.indirect),
-        name: "Indirect delta",
+        name: `Refined delta (${HITS_ITERATIONS})`,
         marker: { color: "rgba(217, 119, 6, 0.86)" },
       },
     ],
@@ -935,19 +997,40 @@ function renderNrai(direct, indirect, deltas) {
   );
 }
 
-function renderOverviewTable(displayRows, hubsRawDirect, hubsRawIndirect, hubsRiskDirect, hubsRiskIndirect, centerCountry, autScoresDirect, autScoresIndirect) {
-  const nodes = [...new Set(displayRows.flatMap((r) => [r.from, r.to]))].sort();
-
+function renderOverviewTable(analysis, centerCountry) {
+  const normalized = state.controls.pairwiseScale === "Column-normalized";
+  const unit = normalized ? "(%)" : "(raw)";
+  const networkScores = (key) => {
+    const totals = [0, 1].map((column) =>
+      analysis.suppliers.reduce((sum, supplier) => sum + supplier[key][column], 0) || 1
+    );
+    return analysis.countries.map((country) => country[key].map((value, column) =>
+      normalized ? value / totals[column] * 100 : value
+    ));
+  };
+  const rawNetwork = networkScores("raw");
+  const riskNetwork = networkScores("risk");
+  const rawTotal = analysis.suppliers.reduce((sum, supplier) => sum + supplier.rawExposure, 0);
+  const riskTotal = analysis.suppliers.reduce((sum, supplier) => sum + supplier.riskExposure, 0);
+  const riskAdjusted = state.controls.analysisMode === "Risk-adjusted";
+  const selectedNetwork = riskAdjusted ? riskNetwork : rawNetwork;
+  const selectedExposureKey = riskAdjusted ? "riskExposure" : "rawExposure";
+  const selectedExposureTotal = riskAdjusted ? riskTotal : rawTotal;
   const headers = [
     "Country",
-    "Trade value",
-    "Risk-weighted value",
-    "Unweighted Hub Direct",
-    "Unweighted Hub Indirect",
-    "Weighted Hub Direct",
-    "Weighted Hub Indirect",
-    "Focus country score direct",
-    "Focus country score indirect",
+    `Product exports to ${centerCountry} (source units)`,
+    `Import share ${normalized ? "(%)" : "(fraction)"}`,
+    "Exporter risk (0-1)",
+    `Trade-only hub (1) ${unit}`,
+    `Trade-only hub (${HITS_ITERATIONS}) ${unit}`,
+    `Risk-adjusted hub (1) ${unit}`,
+    `Risk-adjusted hub (${HITS_ITERATIONS}) ${unit}`,
+    `Trade-only exposure ${unit}`,
+    `Risk-adjusted exposure ${unit}`,
+    `Global importance - Direct ${unit}`,
+    `Global importance - Total ${unit}`,
+    `Import Dependency - Direct ${normalized ? "(%)" : "(fraction)"}`,
+    `Import Dependency - Total ${unit}`,
   ];
 
   els.tableHead.innerHTML = "";
@@ -961,29 +1044,22 @@ function renderOverviewTable(displayRows, hubsRawDirect, hubsRawIndirect, hubsRi
   }
   els.tableHead.append(hr);
 
-  const incomingValue = new Map();
-  const incomingWeighted = new Map();
-  for (const row of displayRows) {
-    const v = Number(row.value || 0);
-    incomingValue.set(row.to, (incomingValue.get(row.to) || 0) + v);
-
-    const risk = Number(row.ps_norm);
-    const weighted = Number.isFinite(risk) ? v * risk : v;
-    incomingWeighted.set(row.to, (incomingWeighted.get(row.to) || 0) + weighted);
-  }
-
-  for (const node of nodes.slice(0, 60)) {
+  const decimals = normalized ? 2 : 6;
+  const exposure = (value, total) => normalized ? (total > 0 ? value / total * 100 : 0) : value;
+  for (const [i, supplier] of analysis.countries.entries()) {
     const tr = document.createElement("tr");
     const vals = [
-      `${node}: ${nameByIso3(node)}`,
-      formatNumber(incomingValue.get(node) || 0, 0),
-      formatNumber(incomingWeighted.get(node) || 0, 0),
-      formatNumber(10 * (hubsRawDirect.get(node) || 0), 3),
-      formatNumber(10 * (hubsRawIndirect.get(node) || 0), 3),
-      formatNumber(10 * (hubsRiskDirect.get(node) || 0), 3),
-      formatNumber(10 * (hubsRiskIndirect.get(node) || 0), 3),
-      formatNumber(autScoresDirect.get(node) || 0, 3),
-      formatNumber(autScoresIndirect.get(node) || 0, 3),
+      `${supplier.country}: ${nameByIso3(supplier.country)}`,
+      formatNumber(supplier.value, 2),
+      formatNumber(supplier.importShare * (normalized ? 100 : 1), decimals),
+      supplier.missingRisk ? "missing" : formatNumber(supplier.supplierRisk, 3),
+      ...rawNetwork[i].map((value) => formatNumber(value, decimals)),
+      ...riskNetwork[i].map((value) => formatNumber(value, decimals)),
+      formatNumber(exposure(supplier.rawExposure, rawTotal), decimals),
+      formatNumber(exposure(supplier.riskExposure, riskTotal), decimals),
+      ...selectedNetwork[i].map((value) => formatNumber(value, decimals)),
+      formatNumber(supplier.importShare * (normalized ? 100 : 1), decimals),
+      formatNumber(exposure(supplier[selectedExposureKey], selectedExposureTotal), decimals),
     ];
 
     for (const v of vals) {
@@ -1021,11 +1097,23 @@ function downloadRawData() {
   URL.revokeObjectURL(url);
 }
 
+function clearProductAnalysis(centerCountry, productCol, productCode) {
+  renderSupplierHeatmaps(computeSupplierAnalysis([], centerCountry));
+  renderNrai(NaN, NaN, new Map());
+  els.tableHead.innerHTML = "";
+  els.tableBody.innerHTML = "";
+  if (cy) {
+    cy.destroy();
+    cy = null;
+  }
+}
+
 function runComputations() {
   const [productCol, productCode] = selectedProductKey();
   let productRows = state.currentHs2Rows.filter((row) => String(row[productCol]) === String(productCode));
 
   if (!productRows.length) {
+    clearProductAnalysis(state.controls.focusCountry, productCol, productCode);
     els.networkTitle.textContent = `No rows for ${productCol}=${productCode}`;
     els.networkProduct.textContent = "";
     return;
@@ -1039,10 +1127,15 @@ function runComputations() {
     centerCountry = agg.centerCountry;
   }
 
-  const { flowRows, renderRows } = computeRenderRows(productRows, centerCountry);
-  const adjacency = buildAdjacency(flowRows);
+  const { flowRows, renderRows, renderNodes, innerCircle } = computeRenderRows(productRows, centerCountry);
+  els.topNPartnersValue.textContent = innerCircle.length === state.controls.topNPartners
+    ? String(state.controls.topNPartners)
+    : `${state.controls.topNPartners} (showing ${innerCircle.length})`;
+  const analysis = computeSupplierAnalysis(productRows, centerCountry);
+  const { adjacency, hitsRaw, hitsRisk } = analysis;
   const centerIdx = adjacency.idxByNode.get(centerCountry);
   if (centerIdx === undefined) {
+    clearProductAnalysis(centerCountry, productCol, productCode);
     els.networkTitle.textContent = `Focus country ${centerCountry} is not available for this product.`;
     els.networkProduct.textContent = "";
     return;
@@ -1056,18 +1149,11 @@ function runComputations() {
   const psNormMax = psNormValues.length ? psNormValues.reduce((maximum, value) => Math.max(maximum, value), -Infinity) : "N/A";
   const nullCount = flowRows.filter((r) => r.ps_norm === null || r.ps_norm === undefined).length;
   console.log(`DEBUG: ps_norm - min: ${psNormMin}, max: ${psNormMax}, null count: ${nullCount}/${flowRows.length}`);
-  renderNetwork(renderRows, centerCountry);
+  renderNetwork(renderRows, centerCountry, flowRows, renderNodes, innerCircle);
 
-  const riskWeights = computeRiskWeights(flowRows, adjacency.nodes);
-  const hitsRaw = hitsIterative(adjacency.matrix, null, 5, 1e-6);
-  const hitsRisk = hitsIterative(adjacency.matrix, riskWeights, 5, 1e-6);
-  const iLastRaw = Math.min(4, hitsRaw.length - 1);
-  const iLastRisk = Math.min(4, hitsRisk.length - 1);
+  const iLastRaw = HITS_ITERATIONS - 1;
+  const iLastRisk = HITS_ITERATIONS - 1;
 
-  const hubsRawDirect = toMap(adjacency.nodes, hitsRaw[0].hub);
-  const hubsRawIndirect = toMap(adjacency.nodes, hitsRaw[iLastRaw].hub);
-  const hubsRiskDirect = toMap(adjacency.nodes, hitsRisk[0].hub);
-  const hubsRiskIndirect = toMap(adjacency.nodes, hitsRisk[iLastRisk].hub);
 
   const directRawScores = computeCenterPairwiseScores(adjacency.matrix, hitsRaw[0].hub, hitsRaw[0].authority, centerIdx);
   const indirectRawScores = computeCenterPairwiseScores(adjacency.matrix, hitsRaw[iLastRaw].hub, hitsRaw[iLastRaw].authority, centerIdx);
@@ -1075,29 +1161,13 @@ function runComputations() {
   const indirectRiskScores = computeCenterPairwiseScores(adjacency.matrix, hitsRisk[iLastRisk].hub, hitsRisk[iLastRisk].authority, centerIdx);
 
   const sum = (arr) => arr.reduce((acc, x) => acc + x, 0);
-  // NRAI formula: ratio of risk-weighted to unweighted authority scores (line 1436-1437 in phoenigs18_v6.py)
-  const eps = 1e-12;
-  const nraiDirect = sum(directRiskScores) / (sum(directRawScores) + eps);
-  const nraiIndirect = sum(indirectRiskScores) / (sum(indirectRawScores) + eps);
+  // Compare risk-weighted and trade-only pairwise totals on the same trade matrix.
+  const rawDirectTotal = sum(directRawScores);
+  const rawIndirectTotal = sum(indirectRawScores);
+  const nraiDirect = rawDirectTotal > 0 ? sum(directRiskScores) / rawDirectTotal : NaN;
+  const nraiIndirect = rawIndirectTotal > 0 ? sum(indirectRiskScores) / rawIndirectTotal : NaN;
 
-  const autScoresDirectMap = toMap(adjacency.nodes, directRawScores);
-  const autScoresIndirectMap = toMap(adjacency.nodes, indirectRawScores);
-
-  renderDependencyHeatmap(
-    adjacency.nodes,
-    state.controls.metricType === "Flows" ? hubsRawDirect : hubsRiskDirect,
-    state.controls.metricType === "Flows" ? hubsRawIndirect : hubsRiskIndirect,
-    centerCountry,
-    state.controls.metricType
-  );
-
-  renderPairwiseHeatmap(
-    adjacency.nodes,
-    state.controls.metricType === "Flows" ? autScoresDirectMap : toMap(adjacency.nodes, directRiskScores),
-    state.controls.metricType === "Flows" ? autScoresIndirectMap : toMap(adjacency.nodes, indirectRiskScores),
-    centerCountry,
-    state.controls.metricType
-  );
+  renderSupplierHeatmaps(analysis);
 
   const deltas = new Map();
   for (let i = 0; i < adjacency.nodes.length; i += 1) {
@@ -1108,16 +1178,7 @@ function runComputations() {
   }
   renderNrai(nraiDirect, nraiIndirect, deltas);
 
-  renderOverviewTable(
-    renderRows,
-    hubsRawDirect,
-    hubsRawIndirect,
-    hubsRiskDirect,
-    hubsRiskIndirect,
-    centerCountry,
-    autScoresDirectMap,
-    autScoresIndirectMap
-  );
+  renderOverviewTable(analysis, centerCountry);
 
   els.networkTitle.textContent = `Direct and indirect trade linkages (${state.controls.metricType})`;
   els.networkProduct.textContent = `${productCode}: ${selectedProductDescription(productCol, productCode)}`;
@@ -1197,6 +1258,13 @@ function wireControls() {
   els.metricType.forEach((radio) => {
     radio.addEventListener("change", (event) => {
       state.controls.metricType = event.target.value;
+      runComputations();
+    });
+  });
+
+  els.analysisMode.forEach((radio) => {
+    radio.addEventListener("change", (event) => {
+      state.controls.analysisMode = event.target.value;
       runComputations();
     });
   });
