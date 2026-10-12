@@ -1,15 +1,12 @@
 const METADATA_URL = "data/metadata.json";
 const HS2_BASE = "data/hs2";
-const RISK_FILE_URL = "data/gew_riskindi.xlsx";
-const HITS_ITERATIONS = 30;
+const RISK_FILE_URL = "data/wgi-pv-risk-2024.json";
+const {
+  HITS_ITERATIONS, EU27_CODES, aggregateEuRows, buildAdjacency, l2norm,
+  hitsIterative, computeRiskWeights, computeSupplierAnalysis, riskMapFromRecords,
+} = TradeAnalysis;
 
 let cy = null; // Global cytoscape instance
-
-const EU27_CODES = new Set([
-  "AUT", "BEL", "BGR", "HRV", "CYP", "CZE", "DNK", "ESP", "EST", "FIN", "FRA",
-  "DEU", "GRC", "HUN", "IRL", "ITA", "LVA", "LTU", "LUX", "MLT", "NLD", "POL",
-  "PRT", "ROU", "SVK", "SVN", "SWE",
-]);
 
 const REGION_COLORS = {
   Asia: "#F4B942",
@@ -23,7 +20,7 @@ const REGION_COLORS = {
 
 const EDGE_COLORS = {
   incoming: "rgba(37, 99, 235, 0.92)",
-  outgoing: "rgba(225, 29, 72, 0.90)",
+  outgoing: "rgba(147, 51, 234, 0.90)",
   other: "rgba(148, 163, 184, 0.55)",
   lowRisk: "rgba(0, 200, 0, 0.7)",
   moderateRisk: "rgba(255, 215, 0, 0.7)",
@@ -156,40 +153,13 @@ async function fetchJson(url) {
 }
 
 async function loadRiskMap() {
-  if (!window.XLSX) {
-    throw new Error("The XLSX parser did not load.");
+  const riskData = await fetchJson(RISK_FILE_URL);
+  if (riskData.observation_year !== 2024 || riskData.dimension !== "pv"
+    || riskData.risk_scale !== "0-100" || !Array.isArray(riskData.records)) {
+    throw new Error("Risk data must contain 2024 WGI Political Stability records.");
   }
 
-  const response = await fetch(RISK_FILE_URL, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${RISK_FILE_URL}: ${response.status}`);
-  }
-
-  const workbook = window.XLSX.read(await response.arrayBuffer(), { type: "array" });
-  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-  const rows = window.XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: null });
-  const headers = (rows[0] || []).map((value) => String(value ?? "").trim().toLowerCase());
-  const iso3Index = headers.indexOf("iso3");
-  const riskIndex = headers.indexOf("risk");
-
-  if (iso3Index < 0 || riskIndex < 0) {
-    throw new Error("Risk workbook must contain iso3 and risk columns.");
-  }
-
-  const riskMap = new Map();
-  for (const row of rows.slice(1)) {
-    const iso3 = String(row[iso3Index] ?? "").trim().toUpperCase();
-    const risk = Number(row[riskIndex]);
-    if (iso3 && Number.isFinite(risk)) {
-      riskMap.set(iso3, risk / 100);
-    }
-  }
-
-  if (!riskMap.size) {
-    throw new Error("Risk workbook contains no numeric risk values.");
-  }
-
-  state.riskMap = riskMap;
+  state.riskMap = riskMapFromRecords(riskData.records).map;
 }
 
 function attachRiskValues(records) {
@@ -350,61 +320,6 @@ function selectedProductDescription(productCol, productCode) {
   return selected?.desc || "Product description unavailable";
 }
 
-function aggregateEuRows(rows, focusCountry) {
-  const collapsed = rows.map((row) => {
-    const from = EU27_CODES.has(row.from) ? "EU27" : row.from;
-    const to = EU27_CODES.has(row.to) ? "EU27" : row.to;
-    return { ...row, from, to };
-  });
-
-  const map = new Map();
-  for (const row of collapsed) {
-    const key = `${row.from}__${row.to}`;
-    if (!map.has(key)) {
-      map.set(key, {
-        from: row.from,
-        to: row.to,
-        value: 0,
-        weightedSum: 0,
-        weightBase: 0,
-        ex_region: row.from === "EU27" ? "EU27" : row.ex_region,
-        im_region: row.to === "EU27" ? "EU27" : row.im_region,
-        ex_name: row.from === "EU27" ? "EU27" : row.ex_name,
-        im_name: row.to === "EU27" ? "EU27" : row.im_name,
-        eu: Boolean(row.eu),
-      });
-    }
-    const agg = map.get(key);
-    const v = Number(row.value || 0);
-    const risk = row.ps_norm == null ? NaN : Number(row.ps_norm);
-    agg.value += v;
-    if (Number.isFinite(risk) && v > 0) {
-      agg.weightedSum += risk * v;
-      agg.weightBase += v;
-    }
-    agg.eu = agg.eu || Boolean(row.eu) || row.from === "EU27" || row.to === "EU27";
-  }
-
-  const out = [];
-  for (const agg of map.values()) {
-    if (agg.from === "EU27" && agg.to === "EU27") continue;
-    out.push({
-      from: agg.from,
-      to: agg.to,
-      value: agg.value,
-      ps_norm: agg.weightBase > 0 ? agg.weightedSum / agg.weightBase : null,
-      ex_region: agg.ex_region,
-      im_region: agg.im_region,
-      ex_name: agg.ex_name,
-      im_name: agg.im_name,
-      eu: agg.eu,
-    });
-  }
-
-  const center = EU27_CODES.has(focusCountry) ? "EU27" : focusCountry;
-  return { rows: out, centerCountry: center };
-}
-
 function rankImportPartners(rows, destinations) {
   const incoming = new Map();
   for (const row of rows) {
@@ -460,65 +375,6 @@ function computeRenderRows(rows, centerCountry) {
   }
 
   return { flowRows, renderRows: filtered, renderNodes, innerCircle };
-}
-
-function buildAdjacency(rows) {
-  const nodes = [...new Set(rows.flatMap((r) => [r.from, r.to]))].sort();
-  const idxByNode = new Map(nodes.map((n, i) => [n, i]));
-  const n = nodes.length;
-  const matrix = Array.from({ length: n }, () => Array(n).fill(0));
-
-  for (const row of rows) {
-    const i = idxByNode.get(row.from);
-    const j = idxByNode.get(row.to);
-    if (i === undefined || j === undefined) continue;
-    matrix[i][j] += Number(row.flow_weight || 0);
-  }
-
-  return { nodes, matrix, idxByNode };
-}
-
-function l2norm(vec) {
-  let sum = 0;
-  for (const x of vec) sum += x * x;
-  return Math.sqrt(sum);
-}
-
-function hitsIterative(adj, nodeWeights = null, maxIter = HITS_ITERATIONS) {
-  const n = adj.length;
-  let h = new Array(n).fill(1);
-  let a = new Array(n).fill(1);
-  const w = nodeWeights && nodeWeights.length === n ? nodeWeights : new Array(n).fill(1);
-  const history = [];
-
-  for (let iter = 0; iter < maxIter; iter += 1) {
-    const aNew = new Array(n).fill(0);
-    for (let i = 0; i < n; i += 1) {
-      for (let j = 0; j < n; j += 1) {
-        aNew[j] += adj[i][j] * h[i];
-      }
-    }
-    for (let j = 0; j < n; j += 1) aNew[j] *= w[j];
-    const aNorm = l2norm(aNew) || 1;
-    for (let j = 0; j < n; j += 1) aNew[j] /= aNorm;
-
-    const hNew = new Array(n).fill(0);
-    for (let i = 0; i < n; i += 1) {
-      for (let j = 0; j < n; j += 1) {
-        hNew[i] += adj[i][j] * aNew[j];
-      }
-    }
-    for (let i = 0; i < n; i += 1) hNew[i] *= w[i];
-    const hNorm = l2norm(hNew) || 1;
-    for (let i = 0; i < n; i += 1) hNew[i] /= hNorm;
-
-    history.push({ hub: hNew.slice(), authority: aNew.slice() });
-
-    h = hNew;
-    a = aNew;
-  }
-
-  return history;
 }
 
 function computeCenterPairwiseScores(adj, hubs, auth, centerIdx) {
@@ -758,29 +614,6 @@ function classifyRegime(direct, indirect) {
   return "Mixed";
 }
 
-function computeRiskWeights(flowRows, nodes) {
-  // Compute mean ps_norm per exporting country (line 1402-1403 in phoenigs18_v6.py)
-  const stats = new Map();
-  for (const row of flowRows) {
-    const key = row.from;
-    if (!stats.has(key)) stats.set(key, { sum: 0, count: 0 });
-    const risk = row.ps_norm == null ? NaN : Number(row.ps_norm);
-    if (Number.isFinite(risk)) {
-      const cur = stats.get(key);
-      cur.sum += risk;
-      cur.count += 1;
-    }
-  }
-
-  // Fallback to 1.0 for countries with no finite ps_norm (line 1409 in phoenigs18_v6.py)
-  return nodes.map((n) => {
-    const s = stats.get(n);
-    if (!s || !s.count) return 1.0;
-    const avgRisk = s.sum / s.count;
-    return Number.isFinite(avgRisk) ? avgRisk : 1.0;
-  });
-}
-
 function scaleHeatmapColumns(values, normalized = state.controls.pairwiseScale === "Column-normalized") {
   if (normalized) {
     const sumDirect = values.reduce((acc, row) => acc + row[0], 0) || 1;
@@ -793,50 +626,6 @@ function scaleHeatmapColumns(values, normalized = state.controls.pairwiseScale =
 
   const max = Math.max(...values.flat(), 1);
   return { z: values, zmax: max };
-}
-
-function computeSupplierAnalysis(rows, centerCountry) {
-  // Risk belongs in the HITS node multipliers, not also in adjacency weights.
-  const tradeRows = rows.map((row) => ({ ...row, flow_weight: Number(row.value || 0) }));
-  const adjacency = buildAdjacency(tradeRows);
-  const riskWeights = computeRiskWeights(tradeRows, adjacency.nodes);
-  const hitsRaw = hitsIterative(adjacency.matrix);
-  const hitsRisk = hitsIterative(adjacency.matrix, riskWeights);
-  const imports = new Map();
-  for (const row of tradeRows) {
-    if (row.to === centerCountry && row.from !== centerCountry && row.value > 0) {
-      imports.set(row.from, (imports.get(row.from) || 0) + Number(row.value));
-    }
-  }
-  const totalImports = [...imports.values()].reduce((sum, value) => sum + value, 0);
-  const suppliers = [...imports].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([country, value]) => {
-      const idx = adjacency.idxByNode.get(country);
-      const importShare = value / totalImports;
-      const raw = [hitsRaw[0].hub[idx], hitsRaw[HITS_ITERATIONS - 1].hub[idx]];
-      const risk = [hitsRisk[0].hub[idx], hitsRisk[HITS_ITERATIONS - 1].hub[idx]];
-      return {
-        country, value, importShare, raw, risk,
-        rawExposure: importShare * raw[1],
-        riskExposure: importShare * risk[1],
-        supplierRisk: riskWeights[idx],
-        missingRisk: !tradeRows.some((row) =>
-          row.from === country && row.ps_norm != null && Number.isFinite(Number(row.ps_norm))
-        ),
-      };
-    });
-  const supplierByCountry = new Map(suppliers.map((supplier) => [supplier.country, supplier]));
-  const countries = adjacency.nodes.map((country, idx) => supplierByCountry.get(country) || {
-    country, value: 0, importShare: 0,
-    raw: [hitsRaw[0].hub[idx], hitsRaw[HITS_ITERATIONS - 1].hub[idx]],
-    risk: [hitsRisk[0].hub[idx], hitsRisk[HITS_ITERATIONS - 1].hub[idx]],
-    rawExposure: 0, riskExposure: 0,
-    supplierRisk: riskWeights[idx],
-    missingRisk: !tradeRows.some((row) =>
-      row.from === country && row.ps_norm != null && Number.isFinite(Number(row.ps_norm))
-    ),
-  }).sort((a, b) => b.importShare - a.importShare || a.country.localeCompare(b.country));
-  return { adjacency, hitsRaw, hitsRisk, suppliers, countries, totalImports };
 }
 
 function supplierHeatmapData(analysis, riskAdjusted, normalized) {

@@ -39,7 +39,7 @@ Flows / Country risk traffic light color control.
 
 ## Link colors
 
-In Flows mode, blue links are imports into the focus country, red links are
+In Flows mode, blue links are imports into the focus country, violet links are
 exports from it, and all links between other countries are light gray and
 dimmed, including links involving inner-ring partners.
 
@@ -122,3 +122,85 @@ table. The CSV button still downloads underlying product records.
 
 Run `node --test dependency\app.test.cjs` from the repository root. Tests include
 Austria's crude-oil imports (HS 270900) in the bundled data.
+
+## Paper calculations: 2024 cross-section
+
+The browser loads `analysis.js` before `app.js`. The shared module exports the
+same EU aggregation, adjacency, HITS, risk-weighting and supplier calculations
+to Node.js. There is no separate implementation of these formulas for the paper.
+
+From the repository root, run:
+
+```powershell
+node scripts\analyze_paper.cjs
+node --test dependency\app.test.cjs scripts\analyze_paper.test.cjs
+```
+
+The batch reads the provisional HS6 selection in
+[`products.json`](../dependency%20paper/products.json), the dashboard metadata
+and chapter files, and the local `baci_hs22_2024.csv`. It checks every selected
+country-pair value and record count against that source before writing results.
+The local source CSV is required and is not bundled with the deployed website.
+
+[`results/`](../dependency%20paper/results/) contains full-precision supplier
+and product CSVs, the provisional crosswalk, directly included LaTeX tables,
+and a manifest with input/code hashes. Outputs include HHI, effective supplier
+counts, exporter-size benchmarks, tied-rank correlations, a 1000-iteration
+convergence diagnostic, and an EU-excluded centrality comparison using fixed
+EU sourcing shares. Undefined rank correlations are blank, not zero.
+The dashboard-compatible baseline remains exactly 30 iterations.
+
+The main baseline is **trade-only**. The appendix additionally exports
+`robustness.csv`, `robustness_suppliers.csv`, and generated `appendix.tex`.
+It compares HS4 hubs using fixed HS6 sourcing shares, separately reports full
+HS4 concentration, retains separate EU member-state nodes as a boundary test,
+and compares iterations 1, 10, 30, 100 and 1000. All codes observed in the
+selected parent headings are reconciled with the source, including a check
+for source codes absent from the dashboard.
+
+Paper robustness results are **conditional local-workbook scenarios**, not
+validated 2024 risk estimates. They use the legacy manual workbook, read by a
+Windows PowerShell OpenXML reader (`scripts\read_paper_risk.ps1`). The browser
+dashboard separately uses the official WGI 2024 Political Stability proxy
+described below. The shared country-risk parser distinguishes blank cells
+from observed zero; blanks use the existing neutral multiplier rather than
+being coerced to zero. Malformed values and duplicate countries fail
+explicitly. The appendix compares stored risk/100 with attenuated multipliers
+`0.5 + 0.5w`, median imputation of missing country inputs, and 30 versus 1000
+iterations for both risk weightings. Import-value-weighted risk coverage is
+reported independently of supplier counts.
+
+Risk-indicator provenance and observation year, the material-to-code crosswalk,
+independent trade corroboration, source monetary units and upstream
+transformations still require external validation before policy interpretation.
+The material selection and manuscript results are explicitly provisional;
+no time-series estimates are produced.
+
+Compile [`paper.tex`](../dependency%20paper/paper.tex) from its own directory
+after running the batch. Its generated tables must exist for compilation.
+
+### Official WGI construction audit
+
+`node scripts\audit_wgi.cjs` audits the downloaded official WGI 2026 workbook
+and methodology under `dependency paper\inputs\wgi`. It extracts the 2024
+Political Stability (`pv`) absolute governance score, constructs
+`risk = 1 - score / 100`, reverses the published uncertainty-interval endpoints,
+and checks the common linear relationship between estimates and scores.
+The current release calls this dimension Political Stability; it should not
+be silently labeled using the older definition.
+
+Outputs include `pv-risk-2024.csv`, `dashboard-comparison.csv`, a hashed
+`audit.json`, `results\wgi-audit.tex`, and
+`dependency/data/wgi-pv-risk-2024.json`, which is the browser dashboard's
+runtime risk input. The JSON stores risk on the dashboard's expected 0-100
+scale. Blank or absent country values stay out of the risk map and retain the
+neutral multiplier of 1.0; observed zero remains a real zero. The audit
+compares WGI values with the legacy manual workbook and examines cached
+formulas in other local inputs. It does not independently re-estimate the
+World Bank's Unobserved Components Model or rerun the manuscript's existing
+conditional-risk scenarios using WGI.
+
+The audit requires the two official files referenced by their URLs in
+`scripts\audit_wgi.cjs` and pre-existing local comparison workbooks. The
+Windows OpenXML inspection uses `scripts\inspect_wgi_workbook.ps1`.
+Test its transformations with `node --test scripts\audit_wgi.test.cjs`.
